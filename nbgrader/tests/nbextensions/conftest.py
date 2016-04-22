@@ -6,6 +6,7 @@ import subprocess as sp
 import logging
 import time
 import sys
+import signal
 
 from selenium import webdriver
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
@@ -14,8 +15,10 @@ from textwrap import dedent
 from nbformat import write as write_nb
 from nbformat.v4 import new_notebook
 
-from .. import run_python_module, copy_coverage_files
+from .. import run_nbgrader, copy_coverage_files
 from ...api import Gradebook
+from ...utils import rmtree
+
 
 @pytest.fixture(scope="module")
 def tempdir(request):
@@ -25,7 +28,7 @@ def tempdir(request):
 
     def fin():
         os.chdir(origdir)
-        shutil.rmtree(tempdir)
+        rmtree(tempdir)
     request.addfinalizer(fin)
 
     return tempdir
@@ -47,7 +50,7 @@ def jupyter_config_dir(request):
     jupyter_config_dir = tempfile.mkdtemp()
 
     def fin():
-        shutil.rmtree(jupyter_config_dir)
+        rmtree(jupyter_config_dir)
     request.addfinalizer(fin)
 
     return jupyter_config_dir
@@ -57,7 +60,7 @@ def jupyter_data_dir(request):
     jupyter_data_dir = tempfile.mkdtemp()
 
     def fin():
-        shutil.rmtree(jupyter_data_dir)
+        rmtree(jupyter_data_dir)
     request.addfinalizer(fin)
 
     return jupyter_data_dir
@@ -68,7 +71,7 @@ def exchange(request):
     exchange = tempfile.mkdtemp()
 
     def fin():
-        shutil.rmtree(exchange)
+        rmtree(exchange)
     request.addfinalizer(fin)
 
     return exchange
@@ -79,7 +82,7 @@ def cache(request):
     cache = tempfile.mkdtemp()
 
     def fin():
-        shutil.rmtree(cache)
+        rmtree(cache)
     request.addfinalizer(fin)
 
     return cache
@@ -88,21 +91,19 @@ def cache(request):
 @pytest.fixture(scope="module")
 def class_files(coursedir):
     # copy files from the user guide
-    source_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "source", "user_guide", "source")
+    source_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "source", "user_guide", "source")
     shutil.copytree(os.path.join(os.path.dirname(__file__), source_path), os.path.join(coursedir, "source"))
+
+    # rename to old names -- we do this rather than changing all the tests
+    # because I want the tests to operate on files with spaces in the names
+    os.rename(os.path.join(coursedir, "source", "ps1"), os.path.join(coursedir, "source", "Problem Set 1"))
+    os.rename(os.path.join(coursedir, "source", "Problem Set 1", "problem1.ipynb"), os.path.join(coursedir, "source", "Problem Set 1", "Problem 1.ipynb"))
+    os.rename(os.path.join(coursedir, "source", "Problem Set 1", "problem2.ipynb"), os.path.join(coursedir, "source", "Problem Set 1", "Problem 2.ipynb"))
 
     # create a fake ps1
     os.mkdir(os.path.join(coursedir, "source", "ps.01"))
     with open(os.path.join(coursedir, "source", "ps.01", "problem 1.ipynb"), "w") as fh:
         write_nb(new_notebook(), fh, 4)
-
-    # create the gradebook
-    gb = Gradebook("sqlite:///" + os.path.join(coursedir, "gradebook.db"))
-    gb.add_assignment("Problem Set 1")
-    gb.add_assignment("ps.01")
-    gb.add_student("Bitdiddle", first_name="Ben", last_name="B")
-    gb.add_student("Hacker", first_name="Alyssa", last_name="H")
-    gb.add_student("Reasoner", first_name="Louis", last_name="R")
 
     return coursedir
 
@@ -114,36 +115,58 @@ def nbserver(request, tempdir, coursedir, jupyter_config_dir, jupyter_data_dir, 
     env['JUPYTER_DATA_DIR'] = jupyter_data_dir
 
     nbextension_dir = os.path.join(jupyter_data_dir, "nbextensions")
-    run_python_module(["nbgrader", "extension", "install", "--nbextensions", nbextension_dir], env=env)
-    run_python_module(["nbgrader", "extension", "activate"], env=env)
+    run_nbgrader(["extension", "install", "--nbextensions", nbextension_dir], env=env)
+    run_nbgrader(["extension", "activate"], env=env)
 
     # create nbgrader_config.py file
-    with open('nbgrader_config.py', 'w') as fh:
-        fh.write(dedent(
-            """
-            c = get_config()
-            c.TransferApp.exchange_directory = '{}'
-            c.TransferApp.cache_directory = '{}'
-            c.NbGrader.course_directory = '{}'
-            """.format(exchange, cache, coursedir)
-        ))
+    if sys.platform != 'win32':
+        with open('nbgrader_config.py', 'w') as fh:
+            fh.write(dedent(
+                """
+                c = get_config()
+                c.TransferApp.exchange_directory = '{}'
+                c.TransferApp.cache_directory = '{}'
+                c.NbGrader.course_directory = '{}'
+                c.NbGrader.db_assignments = [dict(name="Problem Set 1"), dict(name="ps.01")]
+                c.NbGrader.db_students = [
+                    dict(id="Bitdiddle", first_name="Ben", last_name="B"),
+                    dict(id="Hacker", first_name="Alyssa", last_name="H"),
+                    dict(id="Reasoner", first_name="Louis", last_name="R")
+                ]
+                """.format(exchange, cache, coursedir)
+            ))
+
+    kwargs = dict(env=env)
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = sp.CREATE_NEW_PROCESS_GROUP
 
     nbserver = sp.Popen([
         sys.executable, "-m", "jupyter", "notebook",
         "--no-browser",
-        "--port", "9000"], env=env)
+        "--port", "9000"], **kwargs)
 
     def fin():
-        nbserver.send_signal(15) # SIGTERM
+        if sys.platform == 'win32':
+            nbserver.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            nbserver.terminate()
+
         for i in range(10):
             retcode = nbserver.poll()
             if retcode is not None:
                 break
             time.sleep(0.1)
+
         if retcode is None:
             print("couldn't shutdown notebook server, force killing it")
             nbserver.kill()
+
+        nbserver.wait()
         copy_coverage_files()
+
+        # wait a short period of time for kernels to finish shutting down
+        time.sleep(1)
+
     request.addfinalizer(fin)
 
     return nbserver
@@ -176,3 +199,7 @@ def browser(request, tempdir, nbserver):
     return browser
 
 
+notwindows = pytest.mark.skipif(
+    sys.platform == 'win32',
+    reason="Assignment List extension is not available on windows"
+)

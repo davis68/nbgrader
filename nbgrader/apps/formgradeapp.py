@@ -1,7 +1,13 @@
+# Install the pyzmq ioloop. This has to be done before anything else from
+# tornado is imported.
+from zmq.eventloop import ioloop
+ioloop.install()
+
 import os
 import signal
 import notebook
 import logging
+import sys
 
 from nbconvert.exporters import HTMLExporter
 from textwrap import dedent
@@ -97,13 +103,15 @@ class FormgradeApp(NbGrader):
         return classes
 
     def init_signal(self):
+        if sys.platform == 'win32':
+            signal.signal(signal.SIGBREAK, self._signal_stop)
         signal.signal(signal.SIGINT, self._signal_stop)
         signal.signal(signal.SIGTERM, self._signal_stop)
 
     def _signal_stop(self, sig, frame):
         self.log.critical("received signal %s, stopping", sig)
-        self.authenticator_instance.stop(sig)
-        self.io_loop.stop()
+        self.authenticator_instance.stop()
+        ioloop.IOLoop.current().stop()
 
     def build_extra_config(self):
         extra_config = super(FormgradeApp, self).build_extra_config()
@@ -116,7 +124,10 @@ class FormgradeApp(NbGrader):
         super(FormgradeApp, self).initialize(argv)
         self.init_signal()
 
-    def init_logging(self):
+    def init_logging(self, handler_class=None, handler_args=None, color=True, subapps=False):
+        if handler_class:
+            super(FormgradeApp, self).init_logging(handler_class, handler_args, color=color, subapps=subapps)
+
         # hook up tornado 3's loggers to our app handlers
         self.log.propagate = False
         for log in (app_log, access_log, gen_log):
@@ -140,15 +151,15 @@ class FormgradeApp(NbGrader):
 
         # Configure the formgrader settings
         self.tornado_settings = dict(
-            auth=self.authenticator_instance,
-            notebook_dir=self.course_directory,
-            notebook_dir_format=self.directory_structure,
+            nbgrader_auth=self.authenticator_instance,
+            nbgrader_notebook_dir=self.course_directory,
+            nbgrader_notebook_dir_format=self.directory_structure,
             nbgrader_step=self.autograded_directory,
-            exporter=HTMLExporter(config=self.config),
-            mathjax_url=self.mathjax_url,
-            gradebook=Gradebook(self.db_url),
-            jinja2_env=jinja_env,
-            log=self.log
+            nbgrader_exporter=HTMLExporter(config=self.config),
+            nbgrader_mathjax_url=self.mathjax_url,
+            nbgrader_gradebook=Gradebook(self.db_url),
+            nbgrader_jinja2_env=jinja_env,
+            nbgrader_log=self.log
         )
 
     def init_handlers(self):
@@ -169,21 +180,28 @@ class FormgradeApp(NbGrader):
     def start(self):
         super(FormgradeApp, self).start()
 
-        self.init_logging()
+        if self.logfile:
+            self.init_logging(logging.FileHandler, [self.logfile], color=False)
+        else:
+            self.init_logging()
+
         self.init_tornado_settings()
         self.init_handlers()
         self.init_tornado_application()
 
         # Create the application
-        self.io_loop = IOLoop.current()
+        self.io_loop = ioloop.IOLoop.current()
         self.tornado_application.listen(self.port, address=self.ip)
 
         url = "http://{:s}:{:d}/".format(self.ip, self.port)
         self.log.info("Form grader running at {}".format(url))
         self.log.info("Use Control-C to stop this server")
 
-        # register cleanup on both TERM and INT
-        self.init_signal()
+        if sys.platform.startswith('win'):
+            # add no-op to wake every 1s
+            # to handle signals that may be ignored by the inner loop
+            pc = ioloop.PeriodicCallback(lambda : None, 1000)
+            pc.start()
 
         # Start the loop
         self.io_loop.start()

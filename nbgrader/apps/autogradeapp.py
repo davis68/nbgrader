@@ -21,7 +21,14 @@ flags.update({
     'create': (
         {'AutogradeApp': {'create_student': True}},
         "Create an entry for the student in the database, if one does not already exist."
-    )
+    ),
+    'no-execute': (
+        {
+            'Execute': {'enabled': False},
+            'ClearOutput': {'enabled': False}
+        },
+        "Don't execute notebooks and clear output when autograding."
+    ),
 })
 
 class AutogradeApp(BaseNbConvertApp):
@@ -55,16 +62,28 @@ class AutogradeApp(BaseNbConvertApp):
         improve their score).
 
         To grade all submissions for "Problem Set 1":
-        
+
             nbgrader autograde "Problem Set 1"
 
         To grade only the submission by student with ID 'Hacker':
-        
+
             nbgrader autograde "Problem Set 1" --student Hacker
 
         To grade only the notebooks that start with '1':
-        
+
             nbgrader autograde "Problem Set 1" --notebook "1*"
+
+        By default, student submissions are re-executed and their output cleared.
+        For long running notebooks, it can be useful to disable this with the
+        '--no-execute' flag:
+
+            nbgrader autograde "Problem Set 1" --no-execute
+
+        Note, however, that doing so will not guarantee that students' solutions
+        are correct. If you use this flag, you should make sure you manually
+        check all solutions. For example, if a student saved their notebook with
+        all outputs cleared, then using --no-execute would result in them
+        receiving full credit on all autograded problems.
         """
 
     create_student = Bool(
@@ -102,7 +121,19 @@ class AutogradeApp(BaseNbConvertApp):
         LimitOutput,
         SaveAutoGrades
     ])
+    
     preprocessors = List([])
+
+    def _config_changed(self, name, old, new):
+        if 'create_student' in new.AutogradeApp:
+            self.log.warn(
+                "The AutogradeApp.create_student (or the --create flag) option is "
+                "deprecated. Please specify your assignments through the "
+                "`NbGrader.db_students` variable in your nbgrader config file."
+            )
+            del new.AutogradeApp.create_student
+
+        super(AutogradeApp, self)._config_changed(name, old, new)
 
     def init_assignment(self, assignment_id, student_id):
         super(AutogradeApp, self).init_assignment(assignment_id, student_id)
@@ -110,14 +141,18 @@ class AutogradeApp(BaseNbConvertApp):
         # try to get the student from the database, and throw an error if it
         # doesn't exist
         gb = Gradebook(self.db_url)
-        try:
-            gb.find_student(student_id)
-        except MissingEntry:
-            if self.create_student:
-                self.log.warning("Creating student with ID '%s'", student_id)
-                gb.add_student(student_id)
-            else:
-                self.fail("No student with ID '%s' exists in the database", student_id)
+        student = None
+        for s in self.db_students:
+            if s['id'] == student_id:
+                student = s.copy()
+                break
+
+        if student is not None:
+            del student['id']
+            self.log.info("Creating/updating student with ID '%s': %s", student_id, student)
+            gb.update_or_create_student(student_id, **student)
+        else:
+            self.fail("No student with ID '%s' exists in the config", student_id)
 
         # try to read in a timestamp from file
         src_path = self._format_source(assignment_id, student_id)

@@ -7,7 +7,7 @@ import os
 from textwrap import dedent
 
 from traitlets.config.application import catch_config_error
-from traitlets import Bool
+from jupyter_core.application import NoStart
 
 import nbgrader
 from .. import preprocessors
@@ -24,7 +24,8 @@ from . import (
     FetchApp,
     SubmitApp,
     ListApp,
-    ExtensionApp
+    ExtensionApp,
+    QuickStartApp
 )
 
 aliases = {}
@@ -180,6 +181,15 @@ class NbGraderApp(NbGrader):
                 Install and activate the "Create Assignment" notebook extension.
                 """
             ).strip()
+        ),
+        quickstart=(
+            QuickStartApp,
+            dedent(
+                """
+                Create an example class files directory with an example
+                config file and assignment.
+                """
+            ).strip()
         )
     )
 
@@ -215,7 +225,7 @@ class NbGraderApp(NbGrader):
             with open(filename, 'w') as fh:
                 fh.write(s)
             self.log.info("New config file saved to '{}'".format(filename))
-            sys.exit(0)
+            raise NoStart()
 
         # check: is there a subapp given?
         if self.subapp is None:

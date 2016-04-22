@@ -19,11 +19,11 @@ from nbconvert.exporters.export import exporter_map
 from nbconvert.nbconvertapp import NbConvertApp, DottedOrNone
 from textwrap import dedent
 from tornado.log import LogFormatter
-from traitlets import Unicode, List, Bool, Instance, Dict, Integer
+from traitlets import Unicode, List, Bool, Dict, Integer
 from traitlets.config.application import catch_config_error
 from traitlets.config.loader import Config
 
-from ..utils import check_directory, parse_utc, find_all_files
+from ..utils import check_directory, parse_utc, find_all_files, full_split, rmtree, remove
 
 
 nbgrader_aliases = {
@@ -72,6 +72,40 @@ class NbGrader(JupyterApp):
 
     def _log_format_default(self):
         return "%(color)s[%(name)s | %(levelname)s]%(end_color)s %(message)s"
+
+    logfile = Unicode(
+        ".nbgrader.log",
+        config=True,
+        help=dedent(
+            """
+            Name of the logfile to log to.
+            """
+        )
+    )
+
+    def init_logging(self, handler_class, handler_args, color=True, subapps=False):
+        handler = handler_class(*handler_args)
+
+        if color:
+            log_format = self.log_format
+        else:
+            log_format = self.log_format.replace("%(color)s", "").replace("%(end_color)s", "")
+
+        _formatter = self._log_formatter_cls(
+            fmt=log_format,
+            datefmt=self.log_datefmt)
+        handler.setFormatter(_formatter)
+
+        self.log.addHandler(handler)
+
+        if subapps and self.subapp:
+            self.subapp.init_logging(handler_class, handler_args, color=color, subapps=subapps)
+
+    def deinit_logging(self):
+        if len(self.log.handlers) > 1:
+            for handler in self.log.handlers[1:]:
+                handler.close()
+                self.log.removeHandler(handler)
 
     db_url = Unicode(
         "",
@@ -125,7 +159,7 @@ class NbGrader(JupyterApp):
     )
 
     directory_structure = Unicode(
-        "{nbgrader_step}/{student_id}/{assignment_id}",
+        os.path.join("{nbgrader_step}", "{student_id}", "{assignment_id}"),
         config=True,
         help=dedent(
             """
@@ -219,6 +253,42 @@ class NbGrader(JupyterApp):
             The root directory for the course files (that includes the `source`,
             `release`, `submitted`, `autograded`, etc. directories). Defaults to
             the current working directory.
+            """
+        )
+    )
+
+    db_assignments = List(
+        config=True,
+        help=dedent(
+            """
+            A list of assignments that will be created in the database. Each
+            item in the list should be a dictionary with the following keys:
+
+                - name
+                - duedate (optional)
+
+            The values will be stored in the database. Please see the API
+            documentation on the `Assignment` database model for details on
+            these fields.
+            """
+        )
+    )
+
+    db_students = List(
+        config=True,
+        help=dedent(
+            """
+            A list of student that will be created in the database. Each
+            item in the list should be a dictionary with the following keys:
+
+                - id
+                - first_name (optional)
+                - last_name (optional)
+                - email (optional)
+
+            The values will be stored in the database. Please see the API
+            documentation on the `Student` database model for details on
+            these fields.
             """
         )
     )
@@ -322,17 +392,37 @@ class NbGrader(JupyterApp):
     @catch_config_error
     def initialize(self, argv=None):
         self.update_config(self.build_extra_config())
+        if self.logfile:
+            self.init_logging(logging.FileHandler, [self.logfile], color=False)
         super(NbGrader, self).initialize(argv)
 
-    def _format_path(self, nbgrader_step, student_id, assignment_id):
-        return os.path.join(
-            self.course_directory,
-            self.directory_structure.format(
-                nbgrader_step=nbgrader_step,
-                student_id=student_id,
-                assignment_id=assignment_id
-            )
+    def reset(self):
+        # stop logging
+        self.deinit_logging()
+
+        # recursively reset all subapps
+        if self.subapp:
+            self.subapp.reset()
+
+        # clear the instance
+        self.clear_instance()
+
+    def _format_path(self, nbgrader_step, student_id, assignment_id, escape=False):
+
+        kwargs = dict(
+            nbgrader_step=nbgrader_step,
+            student_id=student_id,
+            assignment_id=assignment_id
         )
+
+        if escape:
+            base = re.escape(self.course_directory)
+            structure = [x.format(**kwargs) for x in full_split(self.directory_structure)]
+            path = re.escape(os.path.sep).join([base] + structure)
+        else:
+            path = os.path.join(self.course_directory, self.directory_structure).format(**kwargs)
+
+        return path
 
 
 # These are the aliases and flags for nbgrader apps that inherit only from
@@ -392,6 +482,9 @@ class TransferApp(NbGrader):
 
     @catch_config_error
     def initialize(self, argv=None):
+        if sys.platform == 'win32':
+            self.fail("Sorry, %s is not available on Windows.", self.name.replace("-", " "))
+
         super(TransferApp, self).initialize(argv)
         self.ensure_exchange_directory()
         self.set_timestamp()
@@ -408,9 +501,13 @@ class TransferApp(NbGrader):
         """Actually do the file transfer."""
         raise NotImplementedError
 
-    def do_copy(self, src, dest):
+    def do_copy(self, src, dest, perms=None):
         """Copy the src dir to the dest dir omitting the self.ignore globs."""
         shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*self.ignore))
+        if perms:
+            for dirname, dirnames, filenames in os.walk(dest):
+                for filename in filenames:
+                    os.chmod(os.path.join(dirname, filename), perms)
 
     def start(self):
         super(TransferApp, self).start()
@@ -420,7 +517,7 @@ class TransferApp(NbGrader):
             self.assignment_id = self.extra_args[0]
         elif len(self.extra_args) > 2:
             self.fail("Too many arguments")
-        else:
+        elif self.assignment_id == "":
             self.fail("Must provide assignment name:\nnbgrader <command> ASSIGNMENT [ --course COURSE ]")
 
         self.init_src()
@@ -496,11 +593,11 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
     def _output_directory(self):
         raise NotImplementedError
 
-    def _format_source(self, assignment_id, student_id):
-        return self._format_path(self._input_directory, student_id, assignment_id)
+    def _format_source(self, assignment_id, student_id, escape=False):
+        return self._format_path(self._input_directory, student_id, assignment_id, escape=escape)
 
-    def _format_dest(self, assignment_id, student_id):
-        return self._format_path(self._output_directory, student_id, assignment_id)
+    def _format_dest(self, assignment_id, student_id, escape=False):
+        return self._format_path(self._output_directory, student_id, assignment_id, escape=escape)
 
     def build_extra_config(self):
         extra_config = super(BaseNbConvertApp, self).build_extra_config()
@@ -530,9 +627,10 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
             self.fail("No notebooks were matched by '%s'", fullglob)
 
     def init_single_notebook_resources(self, notebook_filename):
-        regexp = os.path.join(
-            self._format_source("(?P<assignment_id>.*)", "(?P<student_id>.*)"),
-            "(?P<notebook_id>.*).ipynb")
+        regexp = re.escape(os.path.sep).join([
+            self._format_source("(?P<assignment_id>.*)", "(?P<student_id>.*)", escape=True),
+            "(?P<notebook_id>.*).ipynb"
+        ])
 
         m = re.match(regexp, notebook_filename)
         if m is None:
@@ -585,14 +683,14 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         if self.force:
             if self.notebook_id == "*":
                 self.log.warning("Removing existing assignment: {}".format(dest))
-                shutil.rmtree(dest)
+                rmtree(dest)
             else:
                 for notebook in self.notebooks:
                     filename = os.path.splitext(os.path.basename(notebook))[0] + self.exporter.file_extension
                     path = os.path.join(dest, filename)
                     if os.path.exists(path):
                         self.log.warning("Removing existing notebook: {}".format(path))
-                        os.remove(path)
+                        remove(path)
             return True
 
         src = self._format_source(assignment_id, student_id)
@@ -604,14 +702,14 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         if new_timestamp is not None and old_timestamp is not None and new_timestamp > old_timestamp:
             if self.notebook_id == "*":
                 self.log.warning("Updating existing assignment: {}".format(dest))
-                shutil.rmtree(dest)
+                rmtree(dest)
             else:
                 for notebook in self.notebooks:
                     filename = os.path.splitext(os.path.basename(notebook))[0] + self.exporter.file_extension
                     path = os.path.join(dest, filename)
                     if os.path.exists(path):
                         self.log.warning("Updating existing notebook: {}".format(path))
-                        os.remove(path)
+                        remove(path)
             return True
 
         # otherwise, we should skip the assignment
@@ -633,7 +731,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
             if not os.path.exists(os.path.dirname(path)):
                 os.makedirs(os.path.dirname(path))
             if os.path.exists(path):
-                os.remove(path)
+                remove(path)
             self.log.info("Copying %s -> %s", filename, path)
             shutil.copy(filename, path)
 
@@ -646,13 +744,15 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
                 os.chmod(os.path.join(dirname, filename), permissions)
 
     def convert_notebooks(self):
+        errors = []
+
         for assignment in sorted(self.assignments.keys()):
             # initialize the list of notebooks and the exporter
             self.notebooks = sorted(self.assignments[assignment])
             self.exporter = exporter_map[self.export_format](config=self.config)
 
             # parse out the assignment and student ids
-            regexp = self._format_source("(?P<assignment_id>.*)", "(?P<student_id>.*)")
+            regexp = self._format_source("(?P<assignment_id>.*)", "(?P<student_id>.*)", escape=True)
             m = re.match(regexp, assignment)
             if m is None:
                 self.fail("Could not match '%s' with regexp '%s'", assignment, regexp)
@@ -669,20 +769,31 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
                 super(BaseNbConvertApp, self).convert_notebooks()
                 self.set_permissions(gd['assignment_id'], gd['student_id'])
 
-            except:
+            except Exception:
                 self.log.error("There was an error processing assignment: %s", assignment)
+                self.log.error(traceback.format_exc())
+                errors.append((gd['assignment_id'], gd['student_id']))
 
                 dest = os.path.normpath(self._format_dest(gd['assignment_id'], gd['student_id']))
                 if self.notebook_id == "*":
                     if os.path.exists(dest):
                         self.log.warning("Removing failed assignment: {}".format(dest))
-                        shutil.rmtree(dest)
+                        rmtree(dest)
                 else:
                     for notebook in self.notebooks:
                         filename = os.path.splitext(os.path.basename(notebook))[0] + self.exporter.file_extension
                         path = os.path.join(dest, filename)
                         if os.path.exists(path):
                             self.log.warning("Removing failed notebook: {}".format(path))
-                            os.remove(path)
+                            remove(path)
 
-                raise
+        if len(errors) > 0:
+            for assignment_id, student_id in errors:
+                self.log.error(
+                    "There was an error processing assignment '{}' for student '{}'".format(
+                        assignment_id, student_id))
+
+            if self.logfile:
+                self.fail(
+                    "Please see the error log ({}) for details on the specific "
+                    "errors on the above failures.".format(self.logfile))

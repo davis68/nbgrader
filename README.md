@@ -9,67 +9,42 @@ A system for assigning and grading Jupyter notebooks.
 [Documentation can be found on Read the Docs.](http://nbgrader.readthedocs.org)
 
 
-## Visual highlights of nbgrader
+## Highlights of nbgrader
 
 ### Instructor toolbar extension for Jupyter notebooks
 The nbgrader toolbar extension for Jupyter notebooks guides the instructor through
 assignment and grading tasks using the familiar Jupyter notebook interface.
 
-![Creating assignment](docs/source/user_guide/images/creating_assignment.gif "Creating assignment")
+![Creating assignment](nbgrader/docs/source/user_guide/images/creating_assignment.gif "Creating assignment")
 
 ### Student assignment list extension for Jupyter notebooks
 Using the assignment list extension, students may conveniently view, fetch,
 submit, and validate their assignments.
 
-![nbgrader assignment list](docs/source/user_guide/images/student_assignment.gif "nbgrader assignment list")
+![nbgrader assignment list](nbgrader/docs/source/user_guide/images/student_assignment.gif "nbgrader assignment list")
 
 ### The command line tools of nbgrader
-[Command line tools](https://nbgrader.readthedocs.org/en/stable/command_line_tools/index.html)
+[Command line tools](https://nbgrader.readthedocs.org/en/latest/command_line_tools/index.html)
 offer an efficient way for the instructor to generate, assign, release, collect,
 and grade notebooks.
 
-* `nbgrader assign`: create a student version of a notebook
-* `nbgrader release`: release a notebook to students
-* `nbgrader collect`: collect students' submissions
-* `nbgrader autograde`: autograde students' submissions
-* `nbgrader formgrade`: launch the formgrader
-
-
 ## Installation
-
-### The nbgrader system and command line tools
 You may install the current version of nbgrader which includes the grading
-system and command line tools:
+system and command line tools using:
 
     pip install nbgrader
 
-### nbgrader extensions
-You may then install the nbgrader extensions for Jupyter notebook. This will
-install both the *create assignment* toolbar extension and *assignment list*
-notebook server extension:
+Or, if you use [Anaconda](https://www.continuum.io/downloads):
 
-    nbgrader extension install
+    conda install -c jhamrick nbgrader
 
-To use the toolbar extension as either an instructor or a student, activate the
-extension with:
-
-    nbgrader extension activate
-
-If you want to install the extension for only your user environment and not
-systemwide, use `nbgrader extension install --user`.
-If you don't want to have to reinstall the extension when nbgrader is updated,
-use `nbgrader extension install --symlink`.
-
-To get help and see all the options you can pass while installing or activating
-the nbgrader notebook extension, use:
-
-    nbgrader extension install --help-all
-    nbgrader extension activate --help-all
+For detailed instructions on installing nbgrader and the nbgrader extensions
+for Jupyter notebook, please see [Installation](https://nbgrader.readthedocs.org/en/latest/user_guide/installation.html)
+section in the User Guide.
 
 
 ## Contributing
-
-Please see the [contributing guidelines and documentation](CONTRIBUTING.md).
+Please see the [contributing guidelines and documentation](https://nbgrader.readthedocs.org/en/latest/contributor_guide/overview.html).
 
 If you want to develop features for nbgrader, please follow the
-[development installation instructions](CONTRIBUTING.md#development-installation).
+[development installation instructions](https://nbgrader.readthedocs.org/en/latest/contributor_guide/installation_developer.html).

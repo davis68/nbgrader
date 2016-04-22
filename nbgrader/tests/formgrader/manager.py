@@ -2,6 +2,7 @@ import time
 import os
 import subprocess as sp
 import sys
+import signal
 
 from textwrap import dedent
 from .. import start_subprocess, copy_coverage_files
@@ -10,7 +11,6 @@ from .. import start_subprocess, copy_coverage_files
 __all__ = [
     "DefaultManager",
     "HubAuthManager",
-    "HubAuthTokenManager",
     "HubAuthCustomUrlManager",
     "HubAuthNotebookServerUserManager",
     "HubAuthSSLManager"
@@ -45,9 +45,14 @@ class DefaultManager(object):
         pass
 
     def _start_formgrader(self):
+        kwargs = dict(env=self.env)
+        if sys.platform == 'win32':
+            kwargs['creationflags'] = sp.CREATE_NEW_PROCESS_GROUP
+        
         self.formgrader = start_subprocess(
             [sys.executable, "-m", "nbgrader", "formgrade"],
-            env=self.env)
+            **kwargs)
+        
         time.sleep(self.startup_wait)
 
     def start(self):
@@ -56,7 +61,10 @@ class DefaultManager(object):
         self._start_formgrader()
 
     def _stop_formgrader(self):
-        self.formgrader.terminate()
+        if sys.platform == 'win32':
+            self.formgrader.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            self.formgrader.terminate()
 
         # wait for the formgrader to shut down
         for i in range(int(self.shutdown_wait / 0.1)):
@@ -68,6 +76,8 @@ class DefaultManager(object):
         # not shutdown, force kill it
         if retcode is None:
             self.formgrader.kill()
+
+        self.formgrader.wait()
 
     def _stop_jupyterhub(self):
         pass
@@ -99,6 +109,7 @@ class HubAuthManager(DefaultManager):
         c.Authenticator.admin_users = set(['admin'])
         c.Authenticator.whitelist = set(['foobar', 'baz'])
         c.JupyterHub.log_level = "WARN"
+        c.JupyterHub.confirm_no_ssl = True
         """
     )
 
@@ -149,27 +160,6 @@ class HubAuthManager(DefaultManager):
         os.remove(os.path.join(self.tempdir, "jupyterhub_cookie_secret"))
 
 
-class HubAuthTokenManager(HubAuthManager):
-
-    nbgrader_config = dedent(
-        """
-        c = get_config()
-        c.NbGrader.course_id = 'course123ABC'
-        c.FormgradeApp.port = 9000
-        c.FormgradeApp.authenticator_class = "nbgrader.auth.hubauth.HubAuth"
-        c.HubAuth.graders = ["foobar"]
-        c.HubAuth.notebook_url_prefix = "class_files"
-        c.HubAuth.proxy_token = 'foo'
-        c.HubAuth.hubapi_token_user = 'admin'
-        c.HubAuth.generate_hubapi_token = True
-        c.HubAuth.hub_db = '{tempdir}/jupyterhub.sqlite'
-        """
-    )
-
-    def _start_formgrader(self):
-        super(HubAuthManager, self)._start_formgrader()
-
-
 class HubAuthCustomUrlManager(HubAuthManager):
 
     nbgrader_config = dedent(
@@ -208,6 +198,7 @@ class HubAuthNotebookServerUserManager(HubAuthManager):
         c.JupyterHub.spawner_class = 'nbgrader.tests.formgrader.fakeuser.FakeUserSpawner'
         c.JupyterHub.admin_access = True
         c.JupyterHub.log_level = "WARN"
+        c.JupyterHub.confirm_no_ssl = True
         c.Authenticator.admin_users = set(['admin'])
         c.Authenticator.whitelist = set(['foobar', 'baz', 'quux'])
         """
